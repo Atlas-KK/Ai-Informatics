@@ -1,0 +1,12 @@
+{
+  "case_id": "P8-RECOVERY",
+  "label": "Atomic commit, lock and recovery suite",
+  "command": "D:\\AI_informatics\\Ai情报搜集系统\\ai-intel-kb\\.venv\\Scripts\\python.exe -B -m pytest tests/phase2/test_recovery.py tests/phase2/test_lifecycle.py tests/phase6/test_phase6_acceptance.py -q -k \"recovery or stale or deadline or unique_lock or interrupted\"",
+  "started_at": "2026-09-05T15:10:51.332197+00:00",
+  "finished_at": "2026-09-05T15:11:07.095020+00:00",
+  "duration_seconds": 15.763,
+  "exit_code": 0,
+  "status": "PASS",
+  "source_fingerprint": "11ee9e7cfe6d89712b31e3801336b304f738d512fa9eab05ae469fe0adc51ea7",
+  "output": "...........                                                              [100%]\n"
+}
