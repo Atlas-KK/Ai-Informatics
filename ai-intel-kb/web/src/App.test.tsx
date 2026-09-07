@@ -81,6 +81,22 @@ function archiveDetail(item: ArchiveItem): ArchiveDetail {
   }
 }
 
+const settingsData = {
+  schedule_time: '08:30',
+  selection_threshold: 70,
+  tier_caps: { MUST_READ: 3, IMPORTANT: 7, EXTENDED: 10 },
+  topic_order: [
+    '大模型与智能体',
+    'AI 产品形态与行业应用',
+    'AI 产品实战',
+    'AI 工程安全与可靠性',
+  ],
+  default_sort: 'PUBLISHED_DESC',
+  updated_at: '2026-09-04T00:00:00Z',
+}
+
+const response = (data: unknown, ok = true) => ({ ok, json: async () => data }) as Response
+
 beforeEach(() => {
   vi.stubGlobal(
     'fetch',
@@ -92,19 +108,7 @@ beforeEach(() => {
         data = { items: [], total: 0, page: 1, page_size: 20 }
       }
       if (url.endsWith('/api/settings')) {
-        data = {
-          schedule_time: '08:30',
-          selection_threshold: 70,
-          tier_caps: { MUST_READ: 3, IMPORTANT: 7, EXTENDED: 10 },
-          topic_order: [
-            '大模型与智能体',
-            'AI 产品形态与行业应用',
-            'AI 产品实战',
-            'AI 工程安全与可靠性',
-          ],
-          default_sort: 'PUBLISHED_DESC',
-          updated_at: '2026-09-04T00:00:00Z',
-        }
+        data = settingsData
       }
       return { ok: true, json: async () => data } as Response
     }),
@@ -135,12 +139,89 @@ describe('local intelligence workbench shell', () => {
     expect(screen.getByRole('menuitem', { name: '专题档案' })).toHaveClass('ant-menu-item-selected')
   })
 
+  it('keeps successful dashboard content available when an auxiliary bootstrap request fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/api/dashboard')) return response(emptyDashboard)
+      if (url.endsWith('/api/runs')) return response({ detail: '运行记录服务暂不可用' }, false)
+      if (url.endsWith('/api/settings')) return response(settingsData)
+      return response([])
+    }))
+
+    render(<ConfigProvider><App /></ConfigProvider>)
+
+    expect(await screen.findByText('今日无达标情报')).toBeInTheDocument()
+    expect(screen.getByText('部分数据暂不可用')).toBeInTheDocument()
+    expect(screen.getByText(/无法加载：运行记录/)).toBeInTheDocument()
+    expect(screen.queryByText('本地 API 未连接')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: '运行记录' }))
+    expect(await screen.findByText('运行记录加载失败')).toBeInTheDocument()
+    expect(screen.getByText('运行记录服务暂不可用')).toBeInTheDocument()
+  })
+
+  it('shows a retryable trash error instead of presenting a failed request as an empty trash', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/api/dashboard')) return response(emptyDashboard)
+      if (url.endsWith('/api/settings')) return response(settingsData)
+      if (url.endsWith('/api/archive?trash=true')) return response({ detail: '回收站服务暂不可用' }, false)
+      return response([])
+    }))
+
+    render(<ConfigProvider><App /></ConfigProvider>)
+    await screen.findByText('今日无达标情报')
+    fireEvent.click(screen.getByRole('menuitem', { name: '回收站' }))
+
+    expect(await screen.findByText('回收站加载失败')).toBeInTheDocument()
+    expect(screen.getByText('回收站服务暂不可用')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    expect(screen.queryByText('回收站为空')).not.toBeInTheDocument()
+  })
+
+  it('keeps a trashed item visible and reports failed restore and permanent-delete actions', async () => {
+    const trashedItem = {
+      ...archiveItem('event-trash', '待恢复情报'),
+      trash_state: 'TRASHED' as const,
+      trash_reason: '误操作',
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/dashboard')) return response(emptyDashboard)
+      if (url.endsWith('/api/settings')) return response(settingsData)
+      if (url.endsWith('/api/archive?trash=true')) return response([trashedItem])
+      if (url.endsWith('/api/archive/event-trash/restore') && init?.method === 'POST') {
+        return response({ detail: '恢复接口失败' }, false)
+      }
+      if (url.endsWith('/api/archive/event-trash?confirmed=true') && init?.method === 'DELETE') {
+        return response({ detail: '删除接口失败' }, false)
+      }
+      return response([])
+    }))
+
+    render(<ConfigProvider><App /></ConfigProvider>)
+    await screen.findByText('今日无达标情报')
+    fireEvent.click(screen.getByRole('menuitem', { name: '回收站' }))
+    expect(await screen.findByText('待恢复情报')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /^恢\s+复$/ }))
+    expect(await screen.findByText(/恢复“待恢复情报”失败：恢复接口失败/)).toBeInTheDocument()
+    expect(screen.getByText('待恢复情报')).toBeInTheDocument()
+
+    const deleteButton = screen.getByRole('button', { name: '永久删除' })
+    await waitFor(() => expect(deleteButton).toBeEnabled())
+    fireEvent.click(deleteButton)
+    await screen.findByText('永久删除后不可恢复，确认删除？')
+    fireEvent.click(screen.getByRole('button', { name: /^(OK|确\s*定)$/ }))
+    expect(await screen.findByText(/永久删除“待恢复情报”失败：删除接口失败/)).toBeInTheDocument()
+    expect(screen.getByText('待恢复情报')).toBeInTheDocument()
+  })
+
   it('ignores a stale detail response after the user opens another item', async () => {
     const first = archiveItem('event-a', '情报 A')
     const second = archiveItem('event-b', '情报 B')
     let resolveFirst: ((response: Response) => void) | undefined
     let resolveSecond: ((response: Response) => void) | undefined
-    const response = (data: unknown) => ({ ok: true, json: async () => data }) as Response
     vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
       const url = String(input)
       if (url.endsWith('/api/archive/event-a')) {
@@ -163,12 +244,7 @@ describe('local intelligence workbench shell', () => {
         return Promise.resolve(response({ items: [first, second], total: 2, page: 1, page_size: 20 }))
       }
       if (url.endsWith('/api/settings')) {
-        return Promise.resolve(response({
-          schedule_time: '08:30', selection_threshold: 70,
-          tier_caps: { MUST_READ: 3, IMPORTANT: 7, EXTENDED: 10 },
-          topic_order: ['大模型与智能体'], default_sort: 'PUBLISHED_DESC',
-          updated_at: '2026-09-04T00:00:00Z',
-        }))
+        return Promise.resolve(response({ ...settingsData, topic_order: ['大模型与智能体'] }))
       }
       return Promise.resolve(response([]))
     }))

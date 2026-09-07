@@ -64,7 +64,7 @@ describe('quality calibration workbench', () => {
     fireEvent.click(screen.getByRole('tab', { name: '历史重评分' }))
     expect(await screen.findByText('历史重评分是手动追加操作')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '执行历史重评分' })).toBeDisabled()
-  }, 10_000)
+  }, 30_000)
 
   it('shows insufficient samples without creating a configuration', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {

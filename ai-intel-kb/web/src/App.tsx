@@ -340,7 +340,10 @@ function TrashPage({ open, refresh }: { open: (id: string) => void; refresh: () 
     }
   }
 
-  useEffect(() => { void loadTrash() }, [loadTrash])
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadTrash(), 0)
+    return () => window.clearTimeout(timer)
+  }, [loadTrash])
   return (
     <Card title="回收站">
       {actionError && (

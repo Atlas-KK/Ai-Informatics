@@ -4,9 +4,9 @@
 
 ## 维护元数据
 
-- 最近核验：2026-09-06（Asia/Shanghai）。
+- 最近核验：2026-09-07（Asia/Shanghai）。
 - 覆盖范围：`D:\AI_informatics\Ai情报搜集系统\ai-intel-kb` 及其两份上级权威文档。
-- Git 快照（已确认，2026-09-06）：仓库根目录为 `D:\AI_informatics\Ai情报搜集系统`，分支 `main`，`HEAD=884ced3`，相对 `origin/main` ahead 1；PRD、Harness 和既有应用代码已受 Git 跟踪。UI 专项执行文档、UI-1/UI-2 新增源码与截图当前仍未跟踪，未经用户授权不得 `git add`、提交或推送。
+- Git 快照（已确认，2026-09-07）：仓库根目录为 `D:\AI_informatics\Ai情报搜集系统`，分支 `main`，`HEAD=3fd7384`，相对 `origin/main` ahead 2；本轮 UI 失败态测试、Harness 和 Phase 8 刷新证据仍在工作树中，未经用户授权不得 `git add`、提交或推送。
 - 结论标签：**已确认**表示本次读取或执行结果支持；**基于代码的推断**表示静态实现指向该行为但未完成对应运行验证；**待确认**表示仓库不能决定，必须由用户或产品负责人确认。
 
 ## 权威顺序
@@ -57,7 +57,7 @@ Phase 8 的 `PARTIAL` 是严格状态：本地/Fake 能力通过不等于真实�
 | `src/ai_intel/infrastructure/archive/` | staged 提交、正式 Markdown 渲染和启动恢复；只有 READY 才可见 |
 | `src/ai_intel/infrastructure/vault_projection/` | 从权威档案生成可重建的只读阅读投影；不得反向导入 |
 | `src/ai_intel/api/` | FastAPI 本地 API；启动时迁移数据库并运行恢复器；提供 Phase 7 查询和用户操作接口；UI-2 的 archive/search 筛选、排序、分页由服务端执行，`/api/archive` 仅在显式 `paged=true` 时返回分页对象，默认数组响应保持兼容 |
-| `web/` | React/Ant Design/ECharts 本地工作台；`src/app/` 管理应用壳、导航、主题和类型化视图状态，`src/components/` 管理共享展示/状态/确认组件；模拟 E2E 覆盖八类页面和十项写操作，真实栈 E2E 验证 FastAPI/SQLite 契约、刷新持久化与 1 万条页面性能 |
+| `web/` | React/Ant Design/ECharts 本地工作台；`src/app/` 管理应用壳、导航、主题和类型化视图状态，`src/components/` 管理共享展示/状态/确认组件；模拟 E2E 覆盖八类页面和 21 类写操作，真实栈 E2E 验证 FastAPI/SQLite 契约、刷新持久化与 1 万条页面性能 |
 | `scripts/phase8_*`、`docs/phase8/` | Phase 8 一键审计、只读自然日采证、脱敏证据、追踪报告与风险清单 |
 | `migrations/` | 从空库到当前 head 的 Alembic 链；破坏性 downgrade 受显式确认门禁约束 |
 | `tests/` | foundation 及 Phase 2～8 的契约/验收证据；测试存在不等于本次已经执行 |
@@ -115,8 +115,8 @@ Phase 8 的 `PARTIAL` 是严格状态：本地/Fake 能力通过不等于真实�
 | 反馈不得自动修改评分配置；校准必须显式确认并生成版本；回退只能指向真实历史版本；重评分只追加且仅限反馈关联项 | `calibration.py`、`intelligence_repository.py`、`phase7_repository.py`、`api/app.py`、`features/quality/` | 样本不足、确认/拒绝、回退、非法重评范围原子拒绝、同配置追加重评、遥测与浏览器交互 | UI 执行文档 Phase UI-5、PRD AC-I06/I09-I13、AC-M01、Phase 5/7 与前端质量测试 | 已确认；UI-5 已完成 |
 | 运行恢复阶段必须由服务端决定；业务重试只有实际成功才能完成工作项；投递重发必须在仓储层原子认领失败分段，成功分段保持幂等；全失败也必须保留本地日报 | `pipeline_repository.py`、`delivery.py`、`phase7_repository.py`、`api/app.py`、`features/runs/` | 失败结果保持待重试、成功后运行状态对账、失败分段原子认领与并发去重、无失败分段冲突、本地日报详情、浏览器双重试闭环、日志脱敏与全量门禁 | UI 执行文档 Phase UI-6、PRD AC-D12、AC-E01-E11、AC-M02-M04、Phase 6/7 测试 | 已确认；UI-6 已完成，真实飞书仍未授权 |
 | 扩展结果未确认不得入库；确认后必须经过服务端加工与去重；收藏归档须对同一结果幂等并能从既有不可变中间产物恢复；外部 URL 仅允许 HTTP(S)；选题建议只含标题、大纲、爆点和可追溯支撑来源 | `search.py`、`extension_ingestion.py`、`topic_ideas.py`、`source_repository.py`、`event_repository.py`、`phase7_repository.py`、`api/app.py`、`features/intel-detail/expansion/`、`topic-ideas/` | 未收藏不入库、新建/关联已有事件两分支、同一结果成功重放、加工超时恢复、并发收藏单次归档、非 HTTP(S) 拒绝、未配置失败保持原情报、支撑证据映射与浏览器三分支 | UI 执行文档 Phase UI-7、PRD AC-F24/F26、AC-I15、AC-E12、Phase 5/7 与前端测试 | 已确认（Fake/未配置边界）；真实扩展搜索和真实 LLM 仍未授权 |
-| UI 最终验收必须覆盖 loading/empty/partial/error、键盘与焦点、输入名称、小屏退化、六条核心浏览器流程及 10k 性能 | `AppShell.tsx`、`AsyncStateView.tsx`、`RunsPage.tsx`、`phase7.cjs` | 30 条前端测试、21 类浏览器写操作、1440×1000 与 390×844 截图、正式 Phase 8 审计 | UI 执行文档 Phase UI-8、AC-D03/D13、AC-I03-I05、AC-E13-E16、AC-M03-M05 | 已确认；本地 UI 范围完成，运行期延后项不冒充通过 |
-| UI 专项文档、UI-1/UI-2 新增源码和证据尚未被 Git 跟踪，提交边界仍需用户授权 | UI 补全升级文件 | `git status --short --branch --untracked-files=all`；不得擅自 `git add` | 2026-09-06 Git 快照 | 已确认，高风险 |
+| UI 最终验收必须覆盖 loading/empty/partial/error、键盘与焦点、输入名称、小屏退化、六条核心浏览器流程及 10k 性能 | `AppShell.tsx`、`AsyncStateView.tsx`、`RunsPage.tsx`、`phase7.cjs` | 33 条前端测试、21 类浏览器写操作、1440×1000 与 390×844 截图、正式 Phase 8 审计 | UI 执行文档 Phase UI-8、AC-D03/D13、AC-I03-I05、AC-E13-E16、AC-M03-M05 | 已确认；本地 UI 范围完成，运行期延后项不冒充通过 |
+| 启动辅助资源失败不得冒充全局断连；回收站读取/写入失败不得冒充空态或成功 | `web/src/App.tsx`、`web/src/App.test.tsx` | 单一辅助接口失败仍保留 dashboard；受影响页可重试；回收站读取、恢复和永久删除三条失败分支 | UI 执行文档状态契约、2026-09-06 整体验收两项 P1 | 已确认；2026-09-07 复验关闭 |
 
 ## AI 工作协议
 
@@ -130,7 +130,7 @@ Phase 8 的 `PARTIAL` 是严格状态：本地/Fake 能力通过不等于真实�
 
 ## 待确认事项
 
-- UI 专项执行文档、UI-1/UI-2 新增源码和截图何时纳入 Git 跟踪；在确认前不得擅自 `git add`、提交或推送。
+- 本轮 UI 失败态测试、Harness 与刷新后的 Phase 8 证据何时形成提交基线；在确认前不得擅自 `git add`、提交或推送。
 - 前端包清单是否应补充 `engines` 字段；当前启动脚本的兼容门槛为 Node 20.19+、22.12+ 或更高主版本，Node 16.20.2 不兼容、bundled Node 24.19.0 可通过。
 - Phase 8 真实适配与系统调度是否授权；真实 LLM/Embedding/搜索/飞书供应商与身份均未决定。
 - 生产权限模型、数据保留期限、备份/恢复目标、允许的外部副作用、日志保留和敏感数据分类。仓库当前只给出本地单用户和禁止泄密边界，不能据此臆测正式政策。
@@ -171,7 +171,11 @@ powershell -ExecutionPolicy Bypass -File scripts\phase8-audit.ps1
 
 2026-09-06 UI-8 实际验证：补齐 skip link、main landmark、导航展开语义、全局高对比焦点、异步状态 live region、运行行键盘选择及输入可访问名称；模拟浏览器扩展至六条核心流程和 21 类写操作，并验证 390×844 无 document 级横向溢出。正式 `phase8-audit.ps1` 退出码 0：113 条后端测试、30 条前端测试、真实 10k 浏览器冷启动约 1.341 秒、筛选约 0.187 秒；源码指纹 `6fb34e6f15928a93a984a0ee62f11c32386cba09ab563b889fa791c111158354`。UI-8 本地界面范围通过，真实适配器/7 日/30 日项仍按 `BLOCKED`/`NOT_RUN` 保留。
 
+2026-09-07 整体验收 P1 修复复验：启动请求按核心/辅助资源独立结算，辅助失败保留成功内容并显示 partial/受影响页错误；回收站区分 loading/empty/success/error，恢复与永久删除补齐 pending、防重复、失败保留与可见错误。正式 `phase8-audit.ps1` 退出码 0：113 条后端测试、13 个文件/33 条前端测试、21 类浏览器写操作、10k 真实浏览器冷启动约 1.676 秒、筛选约 0.327 秒；源码指纹 `5bf3be34f3e8beb7f30226a74f31395be00cf011e0cace5414e984b3a83fcd1d`。本地/Fake MVP 通过，Phase 8 总体仍为 `PARTIAL`。
+
 ## 更新记录
+
+- 2026-09-07：关闭整体验收两项 P1：辅助资源失败不再触发全局断连，回收站读取/恢复/永久删除失败均有独立状态、保留和重试路径；新增 3 条负向前端测试并将并行耗时较高的质量页用例预算稳定为 30 秒；刷新 Phase 8 正式审计证据和整体验收结论。
 
 - 2026-09-04：将既有约束清单扩展为证据化 Harness；补充范围、实现状态、模块职责、运行/集成边界、高风险矩阵、实际验证、Git 未跟踪风险与待确认政策；保留原有 Phase 5 授权和强制边界。
 - 2026-09-04：推进 Phase 8；新增纯验收评估器、一键本地审计、只读 soak 采证、12 FR/76 AC/9 NFR/CTD 追踪报告及风险清单；总体保持 `PARTIAL`，未授权/未满自然日项保持 `BLOCKED` 或 `NOT_RUN`。
