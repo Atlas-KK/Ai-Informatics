@@ -88,10 +88,14 @@ class PipelineService:
             failures_by_source = Counter(
                 item.source_id for item in collection.failures if item.source_id is not None
             )
+            failure_details = {
+                item.source_id: item for item in collection.failures if item.source_id is not None
+            }
             collected_rows = self.collection.repository.list_collected(plan.run_id)
             items_by_source = Counter(str(row["source_id"]) for row in collected_rows)
             for source in plan.sources:
                 source_failed = source.source_id in failures_by_source
+                failure = failure_details.get(source.source_id)
                 self.telemetry.record(
                     TelemetryEventType.SOURCE_FETCH_FINISHED,
                     {
@@ -100,7 +104,9 @@ class PipelineService:
                         "source_type": source.source_type.value,
                         "status": "FAILED" if source_failed else "SUCCESS",
                         "item_count": items_by_source[source.source_id],
-                        "error_stage": "FETCH" if source_failed else None,
+                        "error_stage": None if failure is None else failure.stage.value,
+                        "failure_reason": None if failure is None else failure.reason,
+                        "retry_count": 0 if failure is None else failure.retry_count,
                     },
                     created_at=self.clock.now(),
                     run_id=run.run_id,

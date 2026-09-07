@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Lock
 from types import MappingProxyType
 from typing import Any, cast
 from uuid import uuid4
@@ -125,10 +126,24 @@ class CalibrationProposalRecord:
     estimated_impact: Mapping[str, Any]
 
 
+def _calibration_proposal_record(row: Mapping[str, Any]) -> CalibrationProposalRecord:
+    return CalibrationProposalRecord(
+        proposal_id=str(row["proposal_id"]),
+        base_config_version=int(row["base_config_version"]),
+        sample_count=int(row["sample_count"]),
+        uncertainty=str(row["uncertainty"]),
+        affected_dimensions=tuple(json.loads(str(row["affected_dimensions_json"]))),
+        suggested_weights=json.loads(str(row["suggested_weights_json"])),
+        suggested_source_overrides=json.loads(str(row["suggested_source_overrides_json"])),
+        estimated_impact=json.loads(str(row["estimated_impact_json"])),
+    )
+
+
 class SQLiteIntelligenceRepository:
     def __init__(self, engine: Engine, data_dir: Path) -> None:
         self.engine = engine
         self.data_dir = data_dir.resolve()
+        self._calibration_lock = Lock()
 
     def list_candidate_contexts(self, report_date: date) -> tuple[CandidateContext, ...]:
         with self.engine.connect() as connection:
@@ -546,6 +561,28 @@ class SQLiteIntelligenceRepository:
             raise IntelligenceRepositoryError("unknown candidate score")
         return self._stored_score(_mapping(row))
 
+    def latest_score_for_version(self, aggregate_version_id: str) -> StoredCandidateScore:
+        """Return the latest immutable score available for a resumable candidate."""
+
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(candidate_scores, aggregate_versions.c.event_id)
+                .join(
+                    aggregate_versions,
+                    aggregate_versions.c.aggregate_version_id
+                    == candidate_scores.c.aggregate_version_id,
+                )
+                .where(candidate_scores.c.aggregate_version_id == aggregate_version_id)
+                .order_by(
+                    candidate_scores.c.created_at.desc(),
+                    candidate_scores.c.score_revision.desc(),
+                )
+                .limit(1)
+            ).first()
+        if row is None:
+            raise IntelligenceRepositoryError("aggregate version has no score")
+        return self._stored_score(_mapping(row))
+
     @staticmethod
     def _stored_score(value: Mapping[str, Any]) -> StoredCandidateScore:
         dimensions = json.loads(str(value["dimensions_json"]))
@@ -706,9 +743,31 @@ class SQLiteIntelligenceRepository:
         suggested_source_overrides: Mapping[str, float],
         estimated_impact: Mapping[str, Any],
         created_at: datetime,
-    ) -> CalibrationProposalRecord:
+    ) -> tuple[CalibrationProposalRecord, bool]:
         proposal_id = str(uuid4())
-        with self.engine.begin() as connection:
+        with self._calibration_lock, self.engine.begin() as connection:
+            pending = (
+                connection.execute(
+                    select(calibration_proposals)
+                    .outerjoin(
+                        calibration_decisions,
+                        calibration_decisions.c.proposal_id == calibration_proposals.c.proposal_id,
+                    )
+                    .where(
+                        calibration_proposals.c.base_config_version == base_config_version,
+                        calibration_decisions.c.decision_id.is_(None),
+                    )
+                    .order_by(
+                        calibration_proposals.c.created_at.desc(),
+                        calibration_proposals.c.proposal_id.desc(),
+                    )
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if pending is not None:
+                return _calibration_proposal_record(dict(pending)), False
             connection.execute(
                 insert(calibration_proposals).values(
                     proposal_id=proposal_id,
@@ -724,15 +783,18 @@ class SQLiteIntelligenceRepository:
                     created_at=_iso(created_at),
                 )
             )
-        return CalibrationProposalRecord(
-            proposal_id,
-            base_config_version,
-            sample_count,
-            uncertainty,
-            affected_dimensions,
-            dict(suggested_weights),
-            dict(suggested_source_overrides),
-            dict(estimated_impact),
+        return (
+            CalibrationProposalRecord(
+                proposal_id,
+                base_config_version,
+                sample_count,
+                uncertainty,
+                affected_dimensions,
+                dict(suggested_weights),
+                dict(suggested_source_overrides),
+                dict(estimated_impact),
+            ),
+            True,
         )
 
     def get_calibration_proposal(self, proposal_id: str) -> CalibrationProposalRecord:
@@ -744,17 +806,7 @@ class SQLiteIntelligenceRepository:
             ).first()
         if row is None:
             raise IntelligenceRepositoryError("unknown calibration proposal")
-        value = _mapping(row)
-        return CalibrationProposalRecord(
-            proposal_id=proposal_id,
-            base_config_version=int(value["base_config_version"]),
-            sample_count=int(value["sample_count"]),
-            uncertainty=str(value["uncertainty"]),
-            affected_dimensions=tuple(json.loads(str(value["affected_dimensions_json"]))),
-            suggested_weights=json.loads(str(value["suggested_weights_json"])),
-            suggested_source_overrides=json.loads(str(value["suggested_source_overrides_json"])),
-            estimated_impact=json.loads(str(value["estimated_impact_json"])),
-        )
+        return _calibration_proposal_record(_mapping(row))
 
     def decide_calibration(
         self,
@@ -844,6 +896,8 @@ class SQLiteIntelligenceRepository:
                     )
                 ).scalar_one()
             )
+            if active == version:
+                raise IntelligenceRepositoryError("scoring configuration is already active")
             connection.execute(
                 update(scoring_configs)
                 .where(scoring_configs.c.config_version == active)
@@ -902,6 +956,22 @@ class SQLiteIntelligenceRepository:
                 )
             )
         return score_id
+
+    def score_history(self, aggregate_version_id: str) -> list[Mapping[str, Any]]:
+        """Return immutable score history in append order for UI rescore evidence."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(candidate_scores)
+                .where(candidate_scores.c.aggregate_version_id == aggregate_version_id)
+                .order_by(
+                    candidate_scores.c.created_at,
+                    candidate_scores.c.config_version,
+                    candidate_scores.c.score_revision,
+                )
+            ).all()
+        if not rows:
+            raise IntelligenceRepositoryError("aggregate version has no score history")
+        return [_mapping(row) for row in rows]
 
     def save_topic_idea(
         self,

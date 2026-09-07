@@ -57,73 +57,92 @@ class ExtensionIngestionService:
         score_value = result["score"]
         if not isinstance(score_value, int | float) or isinstance(score_value, bool):
             raise ExtensionIngestionError("extension result score is invalid")
-        snapshot_id = self.source_repository.save_item(
-            None,
-            CollectedItem(
-                external_id=str(result["result_id"]),
-                source_id=source_id,
-                source_type=SourceType.WEB,
-                title=str(result["title"]),
-                url=str(result["url"]),
-                author=None,
-                published_at=selected_at,
-                first_seen_at=selected_at,
-                published_at_unknown=True,
-                raw_content=raw_content,
-                model_input=truncate_for_model(raw_content, None),
-                status=CollectionStatus.COLLECTED,
-                metadata={
-                    "origin": CandidateOrigin.EXTENDED_SEARCH.value,
-                    "viewpoint": str(result["summary"]),
-                    "external_provider_score": float(score_value),
-                },
-            ),
+        item = CollectedItem(
+            external_id=str(result["result_id"]),
+            source_id=source_id,
+            source_type=SourceType.WEB,
+            title=str(result["title"]),
+            url=str(result["url"]),
+            author=None,
+            published_at=selected_at,
+            first_seen_at=selected_at,
+            published_at_unknown=True,
+            raw_content=raw_content,
+            model_input=truncate_for_model(raw_content, None),
+            status=CollectionStatus.COLLECTED,
+            metadata={
+                "origin": CandidateOrigin.EXTENDED_SEARCH.value,
+                "viewpoint": str(result["summary"]),
+                "external_provider_score": float(score_value),
+            },
         )
+        snapshot_id = self.source_repository.save_item(None, item)
         if snapshot_id is None:
-            raise ExtensionIngestionError("extension result was already ingested")
+            snapshot_id = self.source_repository.find_item_snapshot_id(item)
+        if snapshot_id is None:
+            raise ExtensionIngestionError("extension result snapshot could not be resolved")
 
-        aggregation = EventAggregationService(self.event_repository).process_snapshot_ids(
-            (snapshot_id,),
-            report_date=selected_at.date(),
-            observed_at=selected_at,
-            origin=CandidateOrigin.EXTENDED_SEARCH,
-            selected_for_ingestion=True,
-        )[0]
-        if aggregation.event_id is None:
-            raise ExtensionIngestionError("extension result did not produce an event")
-        if not aggregation.needs_scoring:
-            identity = self.intelligence_repository.formal_identity(aggregation.event_id)
-            if identity is None:
-                raise ExtensionIngestionError("matching event has no formal archive")
-            return ExtensionIngestionResult(identity[0], True)
-
-        if aggregation.version_no is None:
-            raise ExtensionIngestionError("extension event version was not created")
-        contexts = self.intelligence_repository.list_candidate_contexts(selected_at.date())
-        context = next(
-            (
-                item
-                for item in contexts
-                if item.event_id == aggregation.event_id
-                and item.aggregate_version_no == aggregation.version_no
-            ),
-            None,
-        )
-        if context is None:
-            raise ExtensionIngestionError("extension candidate context was not created")
-
-        outcome = IntelligenceProcessingService(
-            self.intelligence_repository, self.llm
-        ).process_context(context, processed_at=selected_at)
-        if not outcome.succeeded or outcome.score_id is None:
-            raise ExtensionIngestionError(
-                f"extension processing failed: {outcome.failure_code or 'UNKNOWN'}"
+        existing_version = self.event_repository.find_version_for_snapshot(snapshot_id)
+        if existing_version is not None:
+            _, aggregate_version_id, aggregate_version_no = existing_version
+            formal_event_id = self.intelligence_repository.existing_formalization(
+                aggregate_version_id
             )
+            if formal_event_id is not None:
+                return ExtensionIngestionResult(formal_event_id, aggregate_version_no > 1)
+            context = self.intelligence_repository.get_candidate_context(aggregate_version_id)
+            deduplicated = aggregate_version_no > 1
+        else:
+            aggregation = EventAggregationService(self.event_repository).process_snapshot_ids(
+                (snapshot_id,),
+                report_date=selected_at.date(),
+                observed_at=selected_at,
+                origin=CandidateOrigin.EXTENDED_SEARCH,
+                selected_for_ingestion=True,
+            )[0]
+            if aggregation.event_id is None:
+                raise ExtensionIngestionError("extension result did not produce an event")
+            if not aggregation.needs_scoring:
+                identity = self.intelligence_repository.formal_identity(aggregation.event_id)
+                if identity is None:
+                    raise ExtensionIngestionError("matching event has no formal archive")
+                return ExtensionIngestionResult(identity[0], True)
+
+            if aggregation.version_no is None:
+                raise ExtensionIngestionError("extension event version was not created")
+            contexts = self.intelligence_repository.list_candidate_contexts(selected_at.date())
+            matched_context = next(
+                (
+                    candidate_context
+                    for candidate_context in contexts
+                    if candidate_context.event_id == aggregation.event_id
+                    and candidate_context.aggregate_version_no == aggregation.version_no
+                ),
+                None,
+            )
+            if matched_context is None:
+                raise ExtensionIngestionError("extension candidate context was not created")
+            context = matched_context
+            deduplicated = aggregation.version_no > 1
+
+        if self.intelligence_repository.processed_exists(context.aggregate_version_id):
+            score_id = self.intelligence_repository.latest_score_for_version(
+                context.aggregate_version_id
+            ).score_id
+        else:
+            outcome = IntelligenceProcessingService(
+                self.intelligence_repository, self.llm
+            ).process_context(context, processed_at=selected_at)
+            if not outcome.succeeded or outcome.score_id is None:
+                raise ExtensionIngestionError(
+                    f"extension processing failed: {outcome.failure_code or 'UNKNOWN'}"
+                )
+            score_id = outcome.score_id
         selection = DailySelectionService(
             self.intelligence_repository,
             self.archive_service,
         ).select_candidate(
-            outcome.score_id,
+            score_id,
             report_date=selected_at.date(),
             selected_at=selected_at,
             archive=True,
@@ -131,4 +150,4 @@ class ExtensionIngestionService:
         )
         if not selection.formal_event_ids:
             raise ExtensionIngestionError("result does not meet archive threshold")
-        return ExtensionIngestionResult(selection.formal_event_ids[0], False)
+        return ExtensionIngestionResult(selection.formal_event_ids[0], deduplicated)

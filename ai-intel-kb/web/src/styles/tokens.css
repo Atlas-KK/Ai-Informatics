@@ -1,0 +1,20 @@
+:root {
+  --color-primary: #1677ff;
+  --color-primary-hover: #4096ff;
+  --color-sidebar: #071a2f;
+  --color-bg-layout: #f5f7fb;
+  --color-bg-surface: #ffffff;
+  --color-text: #172033;
+  --color-text-secondary: #667085;
+  --color-border: #e5eaf2;
+  --color-focus: #0958d9;
+  --radius-control: 8px;
+  --radius-surface: 12px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --shadow-surface: 0 1px 2px rgb(16 24 40 / 4%);
+}

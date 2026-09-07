@@ -6,7 +6,7 @@
 
 - PRD：`D:\AI_informatics\Ai情报搜集系统\AI情报知识库_PRD_工作稿.md`，v3.0
 - 开发执行文档：`D:\AI_informatics\Ai情报搜集系统\AI情报知识库_Codex开发执行文档_v1.1.md`，v1.1-AC
-- UI 参考：Figma 文件 `N2TBiN3T1vELodjyM5e3FD`；2026-09-05 的新 UI 原型评审为不通过，故其仅可作视觉与信息架构初稿，不能替代 PRD v3.0 或作为实现基线。详见 [UI/PRD 评审报告](docs/figma-ui-prd-acceptance-report-2026-09-05.md)。
+- UI 参考：Figma v2 文件 `PjXzkYaVIX4BxV26eW1Tk6`；它定义已确认的布局、信息层级和状态表达，但不能替代 PRD v3.0。UI 补全升级仍按专项执行文档逐阶段验收。
 
 ## 当前实现状态
 
@@ -19,7 +19,7 @@
 | Phase 5 加工与评分 | 已实现（Fake LLM） | 领域/应用/存储路径有验收测试，并由 Phase 7 本地 API/UI 消费 |
 | Phase 6 日任务与日报 | 已实现（本地/Fake） | 唯一锁、超时、断点、日报、分段 outbox 与可观测事件 |
 | Phase 7 HTTP API | 已实现 | 仪表盘、档案/详情、搜索、用户数据、运行、设置、反馈、校准与扩展搜索接口 |
-| Phase 7 Web 页面 | 已实现 | 今日、主题、历史检索、来源、质量、运行、设置、回收站及详情抽屉 |
+| Phase 7 Web 页面 | 已实现并完成 UI-1～UI-8 升级 | 今日、专题、历史检索、来源、质量、运行、设置、回收站及独立详情工作区；扩展搜索与选题闭环使用 Fake/未配置边界 |
 | Phase 8 本地验收 | 部分完成 | full gate、安全、恢复、真实浏览器 1 万条性能及 12 FR/76 AC/9 NFR/CTD 追踪报告已落地；真实时间与外部服务项不冒充通过 |
 | 真实外部适配 | 未授权 | LLM、Embedding、扩展搜索、飞书与系统调度继续使用 Fake/显式降级边界 |
 
@@ -56,7 +56,7 @@ ai-intel-kb/
 │  ├─ adapters/        # fixture、Fake LLM/Feishu 与 Manual Inbox 适配器
 │  ├─ infrastructure/  # SQLite、正式档案、恢复和 Vault 投影
 │  └─ api/             # 本地 FastAPI 查询与用户操作接口
-├─ migrations/         # Alembic 迁移，当前 head 为 0009_phase7_local_web
+├─ migrations/         # Alembic 迁移，当前 head 为 0010_ui4_source_settings
 ├─ tests/              # foundation 与 Phase 2～8 契约/验收测试
 ├─ web/                # React/Ant Design/ECharts 本地工作台
 ├─ scripts/            # bootstrap、质量门禁、secret scan 和 Phase 8 验收/采证
@@ -70,7 +70,7 @@ ai-intel-kb/
 - 运行失败项重试提供可注入接口；生产执行器未配置时返回明确的 503，不伪装成功。
 - 前端 production build 已把图表拆为懒加载 chunk；当前主包 gzip 约 368 KB、图表 chunk gzip 约 165 KB。
 - 当前生产权限、数据保留期限、备份/恢复目标、允许的外部副作用、日志保留及敏感数据分类仍待产品/用户确认。
-- 新 UI 原型存在专题分类与 PRD v3.0 不一致，以及详情版本/来源、校准、扩展搜索和运行重试闭环缺口；在产品确认并通过再验收前，不应将其用于驱动实现变更。
+- UI-1～UI-8 已按 PRD 与专项执行文档补全并通过本地最终验收；当前停止在 UI-8 产品验收点，未经授权不进入真实适配器、小流量试运行或部署。
 - Git 仓库根目录是上一级 `D:\AI_informatics\Ai情报搜集系统`；截至 2026-09-04，两个权威文档和整个 `ai-intel-kb/` 均未被跟踪，`HEAD=afa57cc` 只有初始提交。不要擅自 `git add`、提交或假设 Git 历史能区分现有改动。
 
 ## 质量门禁
@@ -109,7 +109,7 @@ Phase 5 定向测试：
 .\.venv\Scripts\python.exe -B -m pytest tests\phase5 -q
 ```
 
-2026-09-04 的 Phase 8 本地审计：`quality.ps1 -Scope full` 以退出码 0 完成；secret scan、Ruff、格式、mypy、`102 passed`、前端 lint/Vitest/build、模拟交互 E2E 和真实 FastAPI+SQLite 浏览器 E2E 全部通过。安全定向用例 5 条、恢复定向用例 11 条以及 1 万条 repository/SQLite/真实浏览器性能对账均通过；本次两条真实浏览器证据记录冷启动约 1.51～1.63 秒、筛选约 0.24 秒。命令证据绑定当前源码指纹，原始计时和硬件信息保留在脱敏证据中。Phase 8 当前总体为 `PARTIAL`：实际 7 日试运行、人工质量抽检与 30 日观测尚未执行，真实适配器因未授权为 `BLOCKED`。详见 [Phase 8 验收报告](docs/phase8/phase8-acceptance-report.md) 和 [追踪报告](docs/phase8/traceability-report.md)。
+2026-09-06 的 Phase 8 本地审计：`quality.ps1 -Scope full` 以退出码 0 完成；secret scan、Ruff、格式、mypy、`113 passed`、前端 lint/Vitest/build、21 类模拟交互写操作和真实 FastAPI+SQLite 浏览器 E2E 全部通过。安全定向用例 6 条、恢复定向用例 11 条以及 1 万条 repository/SQLite/真实浏览器性能对账均通过；最新证据记录浏览器冷启动约 1.34 秒、筛选约 0.19 秒。命令证据绑定当前源码指纹，原始计时和硬件信息保留在脱敏证据中。UI-8 本地界面范围通过；Phase 8 运行总体仍为 `PARTIAL`：实际 7 日试运行、人工质量抽检与 30 日观测尚未执行，真实适配器因未授权为 `BLOCKED`。详见 [UI-8 最终验收报告](docs/ui-upgrade/UI8_final_acceptance_report.md)、[Phase 8 验收报告](docs/phase8/phase8-acceptance-report.md) 和 [追踪报告](docs/phase8/traceability-report.md)。
 
 Phase 8 的实际计划运行只读采证命令如下；它不会创建或触发 Windows 计划任务：
 

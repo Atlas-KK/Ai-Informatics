@@ -29,6 +29,7 @@ from ai_intel.infrastructure.db.schema import (
     ai_processing_failures,
     ai_processing_results,
     calibration_decisions,
+    calibration_proposals,
     candidate_scores,
     events,
     formalization_links,
@@ -261,6 +262,10 @@ def test_p5_tc_05_feedback_confirmation_rejection_rollback_and_rescore(runtime) 
     assert assessment.proposal is not None
     assert assessment.proposal.sample_count == 5
     assert assessment.proposal.affected_dimensions == ("information_density",)
+    duplicate = service.propose(user_initiated=True, proposed_at=NOW + timedelta(seconds=1))
+    assert duplicate.proposal is not None
+    assert duplicate.proposal.proposal_id == assessment.proposal.proposal_id
+    assert row_count(runtime, calibration_proposals) == 1
     new_version = service.confirm(
         assessment.proposal.proposal_id, user_confirmed=True, confirmed_at=NOW
     )
@@ -274,6 +279,10 @@ def test_p5_tc_05_feedback_confirmation_rejection_rollback_and_rescore(runtime) 
     assert rejected.proposal is not None
     service.reject(rejected.proposal.proposal_id, rejected_at=NOW)
     assert runtime.intelligence_repository.get_active_config().version == 2
+    audit_count = row_count(runtime, scoring_config_audits)
+    with pytest.raises(RuntimeError, match="already active"):
+        service.rollback(2, user_confirmed=True, changed_at=NOW)
+    assert row_count(runtime, scoring_config_audits) == audit_count
     service.rollback(1, user_confirmed=True, changed_at=NOW)
     assert runtime.intelligence_repository.get_active_config().version == 1
     assert row_count(runtime, scoring_configs) == 2

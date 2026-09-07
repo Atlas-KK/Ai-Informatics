@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy import Engine, delete, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import RowMapping
 
 from ai_intel.domain.models import content_digest
 from ai_intel.domain.pipeline import (
@@ -253,6 +254,31 @@ class Phase6Repository:
                 .values(status=status, stage=stage, updated_at=_iso(at))
             )
 
+    def reconcile_run_after_retry(self, run_id: str, *, at: datetime) -> int:
+        """Synchronize run status with the authoritative remaining retry items."""
+        with self.engine.begin() as connection:
+            remaining = int(
+                connection.execute(
+                    select(func.count())
+                    .select_from(pipeline_work_items)
+                    .where(
+                        pipeline_work_items.c.run_id == run_id,
+                        pipeline_work_items.c.status == "WAITING_RETRY",
+                    )
+                ).scalar_one()
+            )
+            values: dict[str, Any] = {"pending_count": remaining, "heartbeat_at": _iso(at)}
+            if remaining == 0:
+                values.update(
+                    status=PipelineRunStatus.SUCCEEDED.value,
+                    error_code=None,
+                    finished_at=_iso(at),
+                )
+            connection.execute(
+                update(pipeline_runs).where(pipeline_runs.c.run_id == run_id).values(**values)
+            )
+        return remaining
+
     def save_digest(
         self,
         *,
@@ -362,19 +388,49 @@ class Phase6Repository:
                 .mappings()
                 .all()
             )
-        return tuple(
-            DeliverySegmentRecord(
-                segment_id=str(row["segment_id"]),
-                digest_id=str(row["digest_id"]),
-                segment_no=int(row["segment_no"]),
-                idempotency_key=str(row["idempotency_key"]),
-                content=str(row["content"]),
-                content_hash=str(row["content_hash"]),
-                status=DeliveryStatus(str(row["status"])),
-                attempt_count=int(row["attempt_count"]),
-                error_code=None if row["error_code"] is None else str(row["error_code"]),
+        return tuple(self._delivery_segment(row) for row in rows)
+
+    def claim_failed_segments(
+        self, digest_id: str, *, claimed_at: datetime
+    ) -> tuple[DeliverySegmentRecord, ...]:
+        """Atomically reserve currently failed segments for one retry request."""
+        with self.engine.begin() as connection:
+            rows = (
+                connection.execute(
+                    update(delivery_segments)
+                    .where(
+                        delivery_segments.c.digest_id == digest_id,
+                        delivery_segments.c.status == DeliveryStatus.FAILED.value,
+                    )
+                    .values(
+                        status=DeliveryStatus.PENDING.value,
+                        error_code=None,
+                        updated_at=_iso(claimed_at),
+                    )
+                    .returning(*delivery_segments.c)
+                )
+                .mappings()
+                .all()
             )
-            for row in rows
+        return tuple(
+            sorted(
+                (self._delivery_segment(row) for row in rows),
+                key=lambda item: item.segment_no,
+            )
+        )
+
+    @staticmethod
+    def _delivery_segment(row: RowMapping) -> DeliverySegmentRecord:
+        return DeliverySegmentRecord(
+            segment_id=str(row["segment_id"]),
+            digest_id=str(row["digest_id"]),
+            segment_no=int(row["segment_no"]),
+            idempotency_key=str(row["idempotency_key"]),
+            content=str(row["content"]),
+            content_hash=str(row["content_hash"]),
+            status=DeliveryStatus(str(row["status"])),
+            attempt_count=int(row["attempt_count"]),
+            error_code=None if row["error_code"] is None else str(row["error_code"]),
         )
 
     def mark_segment(

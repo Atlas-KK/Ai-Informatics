@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import Engine, delete, insert, select, update
+from sqlalchemy import Engine, delete, desc, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ai_intel.domain.source import (
@@ -41,6 +41,11 @@ from ai_intel.infrastructure.telemetry.redaction import redact_text
 
 class SourceRepositoryError(RuntimeError):
     pass
+
+
+def _item_import_key(item: CollectedItem) -> str:
+    content_hash = sha256(item.raw_content.encode("utf-8")).hexdigest()
+    return sha256(f"{item.source_id}\0{item.external_id}\0{content_hash}".encode()).hexdigest()
 
 
 def _iso(value: datetime) -> str:
@@ -141,6 +146,87 @@ class SQLiteSourceRepository:
         with self.engine.connect() as connection:
             rows = connection.execute(statement).all()
         return tuple(self._source(_mapping(row)) for row in rows)
+
+    def list_source_operations(self) -> tuple[Mapping[str, Any], ...]:
+        """Return non-sensitive latest collection and failure state per live source."""
+
+        sources = self.list_sources()
+        source_ids = tuple(source.source_id for source in sources)
+        if not source_ids:
+            return ()
+        latest_collections: dict[str, Mapping[str, Any]] = {}
+        latest_failures: dict[str, Mapping[str, Any]] = {}
+        collected_latest = (
+            select(
+                collected_raw_snapshots.c.source_id,
+                collected_raw_snapshots.c.created_at,
+                collected_raw_snapshots.c.status,
+                collected_raw_snapshots.c.title,
+                func.row_number()
+                .over(
+                    partition_by=collected_raw_snapshots.c.source_id,
+                    order_by=desc(collected_raw_snapshots.c.created_at),
+                )
+                .label("row_number"),
+            )
+            .where(collected_raw_snapshots.c.source_id.in_(source_ids))
+            .subquery()
+        )
+        failure_latest = (
+            select(
+                collection_failures.c.source_id,
+                collection_failures.c.stage,
+                collection_failures.c.reason,
+                collection_failures.c.occurred_at,
+                collection_failures.c.retry_count,
+                func.row_number()
+                .over(
+                    partition_by=collection_failures.c.source_id,
+                    order_by=desc(collection_failures.c.occurred_at),
+                )
+                .label("row_number"),
+            )
+            .where(collection_failures.c.source_id.in_(source_ids))
+            .subquery()
+        )
+        with self.engine.connect() as connection:
+            collected_rows = connection.execute(
+                select(
+                    collected_latest.c.source_id,
+                    collected_latest.c.created_at,
+                    collected_latest.c.status,
+                    collected_latest.c.title,
+                ).where(collected_latest.c.row_number == 1)
+            ).mappings()
+            for row in collected_rows:
+                source_id = str(row["source_id"])
+                latest_collections.setdefault(
+                    source_id,
+                    {key: value for key, value in row.items() if key != "source_id"},
+                )
+            failure_rows = connection.execute(
+                select(
+                    failure_latest.c.source_id,
+                    failure_latest.c.stage,
+                    failure_latest.c.reason,
+                    failure_latest.c.occurred_at,
+                    failure_latest.c.retry_count,
+                ).where(failure_latest.c.row_number == 1)
+            ).mappings()
+            for row in failure_rows:
+                source_id = str(row["source_id"])
+                latest_failures.setdefault(
+                    source_id,
+                    {key: value for key, value in row.items() if key != "source_id"},
+                )
+        return tuple(
+            {
+                "source_id": source.source_id,
+                "latest_collection": latest_collections.get(source.source_id),
+                "latest_failure": latest_failures.get(source.source_id),
+            }
+            for source in sources
+        )
 
     def create_expert(self, name: str, source_ids: Sequence[str]) -> ExpertWhitelistEntry:
         if not name.strip():
@@ -298,9 +384,7 @@ class SQLiteSourceRepository:
         if item.status not in {CollectionStatus.COLLECTED, CollectionStatus.METADATA_ONLY}:
             raise SourceRepositoryError("only collected or metadata-only items may enter the queue")
         content_hash = sha256(item.raw_content.encode("utf-8")).hexdigest()
-        import_key = sha256(
-            f"{item.source_id}\0{item.external_id}\0{content_hash}".encode()
-        ).hexdigest()
+        import_key = _item_import_key(item)
         with self.engine.connect() as connection:
             existing = connection.execute(
                 select(collected_raw_snapshots.c.snapshot_id).where(
@@ -347,6 +431,17 @@ class SQLiteSourceRepository:
             target.unlink(missing_ok=True)
             return None
         return snapshot_id
+
+    def find_item_snapshot_id(self, item: CollectedItem) -> str | None:
+        """Resolve the immutable snapshot created by an earlier idempotent import."""
+
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                select(collected_raw_snapshots.c.snapshot_id).where(
+                    collected_raw_snapshots.c.import_key == _item_import_key(item)
+                )
+            ).scalar_one_or_none()
+        return None if value is None else str(value)
 
     def save_failure(self, run_id: str | None, failure: CollectionFailure) -> str:
         failure_id = str(uuid4())

@@ -61,6 +61,7 @@ DESTRUCTIVE_DATA_TABLES = (
     "delivery_segments",
     "telemetry_events",
     "ui_settings",
+    "github_discovery_settings",
     "extension_search_runs",
     "extension_search_results",
 )
@@ -101,6 +102,10 @@ def downgrade_database(
                     if table_name == "ui_settings":
                         count_statement = count_statement.where(
                             table.c.updated_at != "2026-09-04T00:00:00+00:00"
+                        )
+                    if table_name == "github_discovery_settings":
+                        count_statement = count_statement.where(
+                            table.c.updated_at != "2026-09-06T00:00:00+00:00"
                         )
                     count = connection.execute(count_statement).scalar_one()
                     if count:

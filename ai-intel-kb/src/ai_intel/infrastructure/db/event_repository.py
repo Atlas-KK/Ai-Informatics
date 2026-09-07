@@ -102,6 +102,34 @@ class SQLiteEventRepository:
             captured_at=datetime.fromisoformat(str(value["created_at"])),
         )
 
+    def find_version_for_snapshot(self, snapshot_id: str) -> tuple[str, str, int] | None:
+        """Find the aggregate version already created from an immutable snapshot."""
+
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(
+                    aggregate_versions.c.event_id,
+                    aggregate_versions.c.aggregate_version_id,
+                    aggregate_versions.c.version_no,
+                )
+                .join(
+                    aggregate_evidence,
+                    aggregate_evidence.c.aggregate_version_id
+                    == aggregate_versions.c.aggregate_version_id,
+                )
+                .where(aggregate_evidence.c.upstream_snapshot_id == snapshot_id)
+                .order_by(aggregate_versions.c.version_no.desc())
+                .limit(1)
+            ).first()
+        if row is None:
+            return None
+        value = _mapping(row)
+        return (
+            str(value["event_id"]),
+            str(value["aggregate_version_id"]),
+            int(value["version_no"]),
+        )
+
     def list_match_profiles(self) -> tuple[EventMatchProfile, ...]:
         with self.engine.connect() as connection:
             aggregate_rows = connection.execute(

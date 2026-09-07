@@ -2,8 +2,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ConfigProvider } from 'antd'
 import 'antd/dist/reset.css'
+import './styles/tokens.css'
 import './App.css'
 import App from './App'
+import { appTheme } from './app/theme'
 
 const root = document.getElementById('root')
 
@@ -13,15 +15,7 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <ConfigProvider
-      theme={{
-        token: {
-          colorPrimary: '#1890ff',
-          borderRadius: 2,
-          fontSize: 14,
-        },
-      }}
-    >
+    <ConfigProvider theme={appTheme}>
       <App />
     </ConfigProvider>
   </StrictMode>,

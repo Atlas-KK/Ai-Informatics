@@ -3,7 +3,12 @@
 from datetime import datetime
 
 from ai_intel.config import MissingConfigurationError
-from ai_intel.domain.pipeline import DeliveryResult, DeliverySegmentRecord, DeliveryStatus
+from ai_intel.domain.pipeline import (
+    DeliveryResult,
+    DeliveryRetryResult,
+    DeliverySegmentRecord,
+    DeliveryStatus,
+)
 from ai_intel.infrastructure.db.pipeline_repository import Phase6Repository
 from ai_intel.infrastructure.telemetry import TelemetryEventType, TelemetryRecorder
 from ai_intel.ports.feishu import FeishuSender
@@ -42,25 +47,59 @@ class DeliveryService:
         for segment in segments:
             if segment.status is DeliveryStatus.SENT:
                 continue
-            try:
-                self.sender.send_private(segment)
-            # The sender is an external boundary: network/client libraries expose
-            # different Exception subclasses, but every failed attempt must reach
-            # the outbox instead of aborting the remaining segments.
-            except Exception:
-                self.repository.mark_segment(
-                    segment.segment_id,
-                    status=DeliveryStatus.FAILED,
-                    at=pushed_at,
-                    error_code="FEISHU_SEND_FAILED",
-                )
-            else:
-                self.repository.mark_segment(
-                    segment.segment_id,
-                    status=DeliveryStatus.SENT,
-                    at=pushed_at,
-                    error_code=None,
-                )
+            self._send(segment, pushed_at)
+        result = self._record_result(digest_id, pushed_at=pushed_at, run_id=run_id)
+        return DeliveryResult(
+            result.digest_id,
+            result.status,
+            result.successful_segments,
+            result.failed_segments,
+        )
+
+    def retry_failed(
+        self, digest_id: str, *, pushed_at: datetime, run_id: str | None = None
+    ) -> DeliveryRetryResult:
+        if self.sender is None:
+            raise MissingConfigurationError("FEISHU_APP_ID")
+        claimed = self.repository.claim_failed_segments(digest_id, claimed_at=pushed_at)
+        if not claimed:
+            raise NoFailedDeliverySegmentsError(digest_id)
+        for segment in claimed:
+            self._send(segment, pushed_at)
+        result = self._record_result(digest_id, pushed_at=pushed_at, run_id=run_id)
+        return DeliveryRetryResult(
+            digest_id=result.digest_id,
+            retried_segment_ids=tuple(item.segment_id for item in claimed),
+            status=result.status,
+            successful_segments=result.successful_segments,
+            failed_segments=result.failed_segments,
+        )
+
+    def _send(self, segment: DeliverySegmentRecord, pushed_at: datetime) -> None:
+        assert self.sender is not None
+        try:
+            self.sender.send_private(segment)
+        # The sender is an external boundary: network/client libraries expose
+        # different Exception subclasses, but every failed attempt must reach
+        # the outbox instead of aborting the remaining segments.
+        except Exception:
+            self.repository.mark_segment(
+                segment.segment_id,
+                status=DeliveryStatus.FAILED,
+                at=pushed_at,
+                error_code="FEISHU_SEND_FAILED",
+            )
+        else:
+            self.repository.mark_segment(
+                segment.segment_id,
+                status=DeliveryStatus.SENT,
+                at=pushed_at,
+                error_code=None,
+            )
+
+    def _record_result(
+        self, digest_id: str, *, pushed_at: datetime, run_id: str | None
+    ) -> DeliveryResult:
         final = self.repository.list_segments(digest_id)
         successful = sum(item.status is DeliveryStatus.SENT for item in final)
         failed = sum(item.status is DeliveryStatus.FAILED for item in final)
@@ -97,3 +136,8 @@ class DeliveryService:
         if current or not segments:
             segments.append(current.rstrip())
         return tuple(segments)
+
+
+class NoFailedDeliverySegmentsError(RuntimeError):
+    def __init__(self, digest_id: str) -> None:
+        super().__init__(f"digest {digest_id} has no failed delivery segment")

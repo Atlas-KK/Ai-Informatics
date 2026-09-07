@@ -90,6 +90,15 @@ class DeliveryResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryRetryResult:
+    digest_id: str
+    retried_segment_ids: tuple[str, ...]
+    status: str
+    successful_segments: int
+    failed_segments: int
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineRunResult:
     run_id: str
     status: PipelineRunStatus

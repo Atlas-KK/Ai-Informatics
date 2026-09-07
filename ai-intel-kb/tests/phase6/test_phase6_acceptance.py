@@ -10,7 +10,7 @@ from ai_intel.adapters.llm import FakeLLM
 from ai_intel.application.archive import ArchiveService
 from ai_intel.application.calibration import CalibrationService
 from ai_intel.application.daily_selection import DailySelectionService
-from ai_intel.application.delivery import DeliveryService
+from ai_intel.application.delivery import DeliveryService, NoFailedDeliverySegmentsError
 from ai_intel.application.digest import DigestService
 from ai_intel.application.event_aggregation import EventAggregationService
 from ai_intel.application.intelligence_processing import IntelligenceProcessingService
@@ -355,12 +355,20 @@ def test_p6_tc_04_partial_and_total_delivery_failures_retry_failed_only(runtime)
     )
     first = service.push(digest.digest_id, pushed_at=NOW)
     successful_keys = set(sender.sent)
+    segments_after_first = runtime.phase6_repository.list_segments(digest.digest_id)
     assert first.status == "PARTIAL"
 
     sender.fail_segment_numbers.clear()
-    second = service.push(digest.digest_id, pushed_at=NOW + timedelta(minutes=1))
+    second = service.retry_failed(digest.digest_id, pushed_at=NOW + timedelta(minutes=1))
     assert second.status == "SUCCESS"
+    assert set(second.retried_segment_ids) == {
+        segment.segment_id
+        for segment in segments_after_first
+        if segment.idempotency_key not in successful_keys
+    }
     assert all(sender.attempts.count(key) == 1 for key in successful_keys)
+    with pytest.raises(NoFailedDeliverySegmentsError):
+        service.retry_failed(digest.digest_id, pushed_at=NOW + timedelta(minutes=2))
 
     second_digest = runtime.phase6_repository.save_digest(
         report_date=REPORT_DATE,
@@ -380,6 +388,23 @@ def test_p6_tc_04_partial_and_total_delivery_failures_retry_failed_only(runtime)
     ).push(second_digest.digest_id, pushed_at=NOW)
     assert failed.status == "FAILED"
     assert runtime.phase6_repository.get_digest(second_digest.digest_id).markdown == markdown
+
+    barrier = Barrier(2)
+
+    def claim_failed() -> tuple[str, ...]:
+        barrier.wait()
+        return tuple(
+            item.segment_id
+            for item in runtime.phase6_repository.claim_failed_segments(
+                second_digest.digest_id, claimed_at=NOW + timedelta(minutes=1)
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claims = tuple(executor.map(lambda _index: claim_failed(), range(2)))
+    claimed_ids = [segment_id for claim in claims for segment_id in claim]
+    assert len(claimed_ids) == len(set(claimed_ids))
+    assert len(claimed_ids) == len(runtime.phase6_repository.list_segments(second_digest.digest_id))
 
     timeout_digest = runtime.phase6_repository.save_digest(
         report_date=REPORT_DATE,
@@ -665,6 +690,12 @@ def test_p6_tc_07_source_failure_does_not_block_pipeline(runtime) -> None:  # ty
         successful.source_id,
         failing.source_id,
     }
+    failure_event = next(
+        row for row in source_events if row["payload"]["source_id"] == failing.source_id
+    )
+    assert failure_event["payload"]["error_stage"] == "FETCH"
+    assert failure_event["payload"]["failure_reason"] == "fixture source failure"
+    assert failure_event["payload"]["retry_count"] == 0
     event_types = [row["event_type"] for row in telemetry.list(result.run_id)]
     assert event_types[0] == TelemetryEventType.PIPELINE_RUN_STARTED.value
     assert event_types[-1] == TelemetryEventType.PIPELINE_RUN_FINISHED.value

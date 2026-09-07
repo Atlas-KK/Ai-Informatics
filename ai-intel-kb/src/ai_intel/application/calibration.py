@@ -77,7 +77,7 @@ class CalibrationService:
         target = sorted(counts, key=lambda key: (-counts[key], key))[0]
         suggested = self._increase_weight(base, target)
         uncertainty = "LOW" if sample_count >= 20 else "MEDIUM"
-        proposal = self.repository.save_calibration_proposal(
+        proposal, created = self.repository.save_calibration_proposal(
             base_config_version=base.version,
             sample_count=sample_count,
             uncertainty=uncertainty,
@@ -91,7 +91,7 @@ class CalibrationService:
             },
             created_at=proposed_at,
         )
-        if self.telemetry is not None:
+        if created and self.telemetry is not None:
             self.telemetry.record(
                 TelemetryEventType.SCORING_CALIBRATION_PROPOSED,
                 {
@@ -102,7 +102,7 @@ class CalibrationService:
                 },
                 created_at=proposed_at,
             )
-        return CalibrationAssessment(sample_count, uncertainty, proposal)
+        return CalibrationAssessment(proposal.sample_count, proposal.uncertainty, proposal)
 
     @staticmethod
     def _increase_weight(config: ScoringConfig, target: str) -> dict[str, float]:

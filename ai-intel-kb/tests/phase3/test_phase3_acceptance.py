@@ -19,6 +19,7 @@ from ai_intel.api.app import create_app
 from ai_intel.application.sources import CollectionService, MetricService, SourceService
 from ai_intel.config import Settings
 from ai_intel.domain.source import (
+    CollectionFailure,
     CollectionStage,
     CollectionStatus,
     CollectionWindow,
@@ -445,6 +446,27 @@ def test_source_api_contract_supports_crud_pause_resume_and_logical_delete(
         expert_id = expert.json()["expert_id"]
         assert expert.status_code == 200
         assert len(client.get("/api/experts").json()) == 1
+        runtime = client.app.state.runtime
+        collection = CollectionService(
+            runtime.source_repository,
+            {SourceType.WEB: WebCollector(FixedGateway({source_id: (payload("api-operation"),)}))},
+        )
+        collection.run(STARTED)
+        runtime.source_repository.save_failure(
+            None,
+            CollectionFailure(
+                source_id,
+                CollectionStage.FETCH,
+                "redacted-safe fixture failure",
+                STARTED,
+                retry_count=1,
+            ),
+        )
+        operation = client.get("/api/source-operations").json()[0]
+        assert operation["source_id"] == source_id
+        assert operation["latest_collection"]["status"] == "COLLECTED"
+        assert operation["latest_failure"]["stage"] == "FETCH"
+        assert operation["latest_failure"]["retry_count"] == 1
         assert client.delete(f"/api/experts/{expert_id}").json()["state"] == "DELETED"
         assert client.delete(f"/api/sources/{source_id}").json()["state"] == "DELETED"
         assert client.get("/api/sources").json() == []

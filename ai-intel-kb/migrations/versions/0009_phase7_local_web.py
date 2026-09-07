@@ -37,7 +37,7 @@ def upgrade() -> None:
                 "singleton_id": 1,
                 "schedule_time": "08:30",
                 "selection_threshold": 70,
-                "tier_caps_json": '{"MUST_READ":3,"IMPORTANT":7,"EXTENDED":10}',
+                "tier_caps_json": '{"MUST_READ":10,"IMPORTANT":20,"EXTENDED":20}',
                 "topic_order_json": (
                     '["大模型与智能体","AI 产品形态与行业应用","AI 产品实战","AI 工程安全与可靠性"]'
                 ),

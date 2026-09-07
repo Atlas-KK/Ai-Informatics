@@ -3,10 +3,12 @@
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from threading import Lock
 from typing import cast
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import IntegrityError, NoResultFound
 
 from ai_intel.api.schemas import (
     ConfirmationRequest,
@@ -16,6 +18,7 @@ from ai_intel.api.schemas import (
     FeedbackRequest,
     HealthResponse,
     NoteRequest,
+    RescoreRequest,
     SettingsRequest,
     SourceResponse,
     SourceWriteRequest,
@@ -25,14 +28,19 @@ from ai_intel.api.schemas import (
 )
 from ai_intel.application.archive import ArchiveService
 from ai_intel.application.calibration import CalibrationService
+from ai_intel.application.delivery import NoFailedDeliverySegmentsError
 from ai_intel.application.extension_ingestion import (
     ExtensionIngestionError,
     ExtensionIngestionService,
 )
+from ai_intel.application.intelligence_processing import ProcessingOutcome
 from ai_intel.application.search import ExpansionSearchProvider, SemanticRanker
 from ai_intel.application.sources import SourceService
+from ai_intel.application.topic_ideas import TopicIdeaService, TopicIdeaTrigger
 from ai_intel.config import Settings
+from ai_intel.domain.ai_processing import ProcessingContractError
 from ai_intel.domain.models import utc_now
+from ai_intel.domain.pipeline import DeliveryRetryResult
 from ai_intel.domain.source import SourceDraft, SourceState
 from ai_intel.domain.states import ReadState
 from ai_intel.foundation import RuntimeContext, close_runtime, initialize_runtime
@@ -51,11 +59,13 @@ def create_app(
     semantic_ranker: SemanticRanker | None = None,
     expansion_provider: ExpansionSearchProvider | None = None,
     processing_llm: StructuredLLM | None = None,
-    retry_handler: Callable[[str, str], object] | None = None,
+    retry_handler: Callable[[str, str], ProcessingOutcome] | None = None,
+    delivery_retry_handler: Callable[[str], DeliveryRetryResult] | None = None,
 ) -> FastAPI:
     """Build an application instance with isolated runtime settings."""
 
     app_settings = settings or Settings()
+    extension_favorite_lock = Lock()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -113,6 +123,11 @@ def create_app(
     @app.get("/api/sources", response_model=list[SourceResponse], tags=["sources"])
     def list_sources(request: Request, include_deleted: bool = False) -> object:
         return source_service(request).list(include_deleted=include_deleted)
+
+    @app.get("/api/source-operations", tags=["sources"])
+    def list_source_operations(request: Request) -> object:
+        runtime = cast(RuntimeContext, request.app.state.runtime)
+        return runtime.source_repository.list_source_operations()
 
     @app.put("/api/sources/{source_id}", response_model=SourceResponse, tags=["sources"])
     def update_source(source_id: str, payload: SourceWriteRequest, request: Request) -> object:
@@ -187,25 +202,64 @@ def create_app(
     def list_topics(request: Request) -> object:
         runtime = cast(RuntimeContext, request.app.state.runtime)
         settings_value = runtime.phase7_repository.get_settings()
-        return {"topics": settings_value["topic_order"]}
+        summaries = {item["name"]: item for item in runtime.phase7_repository.topic_summaries()}
+        ordered = [summaries[topic] for topic in settings_value["topic_order"]]
+        return {"topics": settings_value["topic_order"], "summaries": ordered}
 
     @app.get("/api/archive", tags=["phase7"])
     def list_archive(
         request: Request,
         topic: str | None = None,
         tier: str | None = None,
+        source: str | None = None,
+        tag: str | None = None,
         favorite: bool | None = None,
         unread: bool | None = None,
+        read_state: str | None = Query(default=None, pattern="^(?:READ|UNREAD)$"),
+        date_from: date | None = None,
+        date_to: date | None = None,
+        min_score: float | None = Query(default=None, ge=0, le=100),
+        sort: str = Query(
+            default="PUBLISHED_DESC", pattern="^(?:PUBLISHED_DESC|SCORE_DESC|TIER_PRIORITY)$"
+        ),
         trash: bool = False,
+        paged: bool = False,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=200),
         limit: int = Query(default=200, ge=1, le=1000),
     ) -> object:
         runtime = cast(RuntimeContext, request.app.state.runtime)
+        resolved_read_state = read_state
+        if resolved_read_state is None and unread is not None:
+            resolved_read_state = "UNREAD" if unread else "READ"
+        if paged:
+            return runtime.phase7_repository.query_archive(
+                topic=topic,
+                tier=tier,
+                source_id=source,
+                tag=tag,
+                favorite=favorite,
+                read_state=resolved_read_state,
+                include_trashed=trash,
+                published_from=date_from,
+                published_to=date_to,
+                minimum_score=min_score,
+                sort=sort,
+                page=page,
+                page_size=page_size,
+            )
         return runtime.phase7_repository.list_archive(
             topic=topic,
             tier=tier,
             favorite=favorite,
-            unread=unread,
+            read_state=resolved_read_state,
             include_trashed=trash,
+            published_from=date_from,
+            published_to=date_to,
+            source_id=source,
+            tag=tag,
+            minimum_score=min_score,
+            sort=sort,
             limit=limit,
         )
 
@@ -265,11 +319,42 @@ def create_app(
 
     @app.get("/api/search", tags=["phase7"])
     def local_search(
-        request: Request, q: str = Query(min_length=1, max_length=500), limit: int = 50
+        request: Request,
+        q: str = Query(min_length=1, max_length=500),
+        topic: str | None = None,
+        tier: str | None = None,
+        source: str | None = None,
+        tag: str | None = None,
+        favorite: bool | None = None,
+        read_state: str | None = Query(default=None, pattern="^(?:READ|UNREAD)$"),
+        date_from: date | None = None,
+        date_to: date | None = None,
+        min_score: float | None = Query(default=None, ge=0, le=100),
+        sort: str = Query(
+            default="RELEVANCE", pattern="^(?:RELEVANCE|PUBLISHED_DESC|SCORE_DESC|TIER_PRIORITY)$"
+        ),
+        page: int = Query(default=1, ge=1),
+        page_size: int | None = Query(default=None, ge=1, le=200),
+        limit: int = Query(default=50, ge=1, le=200),
     ) -> object:
         runtime = cast(RuntimeContext, request.app.state.runtime)
         try:
-            return runtime.phase7_repository.search(q, semantic_ranker=semantic_ranker, limit=limit)
+            return runtime.phase7_repository.search(
+                q,
+                semantic_ranker=semantic_ranker,
+                topic=topic,
+                tier=tier,
+                source_id=source,
+                tag=tag,
+                favorite=favorite,
+                read_state=read_state,
+                published_from=date_from,
+                published_to=date_to,
+                minimum_score=min_score,
+                sort=sort,
+                page=page,
+                page_size=page_size or limit,
+            )
         except Phase7RepositoryError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -277,6 +362,14 @@ def create_app(
     def list_runs(request: Request) -> object:
         runtime = cast(RuntimeContext, request.app.state.runtime)
         return runtime.phase7_repository.list_runs()
+
+    @app.get("/api/runs/{run_id}", tags=["phase7"])
+    def run_detail(run_id: str, request: Request) -> object:
+        runtime = cast(RuntimeContext, request.app.state.runtime)
+        try:
+            return runtime.phase7_repository.get_run_detail(run_id)
+        except Phase7RepositoryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/runs/{run_id}/retry", tags=["phase7"])
     def retry_run(run_id: str, request: Request) -> object:
@@ -287,17 +380,48 @@ def create_app(
         if retry_handler is None:
             raise HTTPException(status_code=503, detail="retry executor is not configured")
         completed: list[dict[str, str]] = []
+        failed: list[dict[str, str]] = []
         for item in work_items:
-            retry_handler(item["aggregate_version_id"], item["stage"])
-            runtime.phase6_repository.mark_work_item(
-                run_id,
-                item["aggregate_version_id"],
-                status="COMPLETED",
-                stage=item["stage"],
-                at=utc_now(),
-            )
-            completed.append(item)
-        return {"run_id": run_id, "retried": completed}
+            outcome = retry_handler(item["aggregate_version_id"], item["stage"])
+            if outcome.succeeded:
+                runtime.phase6_repository.mark_work_item(
+                    run_id,
+                    item["aggregate_version_id"],
+                    status="COMPLETED",
+                    stage=item["stage"],
+                    at=utc_now(),
+                )
+                completed.append(item)
+            else:
+                failed.append({**item, "error_code": outcome.failure_code or "RETRY_FAILED"})
+        remaining = runtime.phase6_repository.reconcile_run_after_retry(run_id, at=utc_now())
+        return {
+            "run_id": run_id,
+            "retried": completed,
+            "failed": failed,
+            "remaining_retry_count": remaining,
+        }
+
+    @app.post("/api/digests/{digest_id}/retry-failed-segments", tags=["phase7"])
+    def retry_failed_delivery_segments(digest_id: str, request: Request) -> object:
+        runtime = cast(RuntimeContext, request.app.state.runtime)
+        try:
+            runtime.phase6_repository.get_digest(digest_id)
+        except NoResultFound as exc:
+            raise HTTPException(status_code=404, detail="digest not found") from exc
+        if delivery_retry_handler is None:
+            raise HTTPException(status_code=503, detail="delivery retry executor is not configured")
+        try:
+            result = delivery_retry_handler(digest_id)
+        except NoFailedDeliverySegmentsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "digest_id": result.digest_id,
+            "retried_segment_ids": list(result.retried_segment_ids),
+            "status": result.status,
+            "successful_segments": result.successful_segments,
+            "failed_segments": result.failed_segments,
+        }
 
     @app.get("/api/settings", tags=["phase7"])
     def get_settings(request: Request) -> object:
@@ -306,13 +430,31 @@ def create_app(
 
     @app.get("/api/configuration-status", tags=["phase7"])
     def configuration_status() -> object:
-        return {
+        services = {
             "semantic_search": semantic_ranker is not None,
             "expansion_search": expansion_provider is not None,
             "intelligence_processing": processing_llm is not None,
             "retry_executor": retry_handler is not None,
-            "feishu": False,
+            "feishu": delivery_retry_handler is not None,
         }
+        display_names = {
+            "semantic_search": "语义检索服务",
+            "expansion_search": "扩展搜索服务",
+            "intelligence_processing": "情报处理模型",
+            "retry_executor": "失败重试执行器",
+            "feishu": "飞书推送",
+        }
+        return {
+            **services,
+            "services": services,
+            "missing_items": [display_names[key] for key, ready in services.items() if not ready],
+        }
+
+    @app.get("/api/scoring-config", tags=["phase7"])
+    def scoring_config(request: Request) -> object:
+        runtime = cast(RuntimeContext, request.app.state.runtime)
+        config = runtime.intelligence_repository.ensure_default_config(utc_now())
+        return {"version": config.version, "weights": dict(config.weights)}
 
     @app.put("/api/settings", tags=["phase7"])
     def update_settings(payload: SettingsRequest, request: Request) -> object:
@@ -324,6 +466,7 @@ def create_app(
                 tier_caps=payload.tier_caps,
                 topic_order=payload.topic_order,
                 default_sort=payload.default_sort,
+                github_rules=payload.github_rules.model_dump(),
                 updated_at=utc_now(),
             )
         except ValueError as exc:
@@ -355,9 +498,9 @@ def create_app(
     @app.post("/api/calibration/proposals", tags=["phase7"])
     def propose_calibration(request: Request) -> object:
         runtime = cast(RuntimeContext, request.app.state.runtime)
-        assessment = CalibrationService(runtime.intelligence_repository).propose(
-            user_initiated=True, proposed_at=utc_now()
-        )
+        assessment = CalibrationService(
+            runtime.intelligence_repository, TelemetryRecorder(runtime.engine)
+        ).propose(user_initiated=True, proposed_at=utc_now())
         return {
             "sample_count": assessment.sample_count,
             "uncertainty": assessment.uncertainty,
@@ -370,9 +513,9 @@ def create_app(
     ) -> object:
         runtime = cast(RuntimeContext, request.app.state.runtime)
         try:
-            version = CalibrationService(runtime.intelligence_repository).confirm(
-                proposal_id, user_confirmed=payload.confirmed, confirmed_at=utc_now()
-            )
+            version = CalibrationService(
+                runtime.intelligence_repository, TelemetryRecorder(runtime.engine)
+            ).confirm(proposal_id, user_confirmed=payload.confirmed, confirmed_at=utc_now())
             return {"config_version": version}
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -394,10 +537,61 @@ def create_app(
     ) -> object:
         runtime = cast(RuntimeContext, request.app.state.runtime)
         try:
-            CalibrationService(runtime.intelligence_repository).rollback(
-                version, user_confirmed=payload.confirmed, changed_at=utc_now()
-            )
+            CalibrationService(
+                runtime.intelligence_repository, TelemetryRecorder(runtime.engine)
+            ).rollback(version, user_confirmed=payload.confirmed, changed_at=utc_now())
             return {"config_version": version, "active": True}
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/calibration/workbench", tags=["phase7"])
+    def calibration_workbench(request: Request) -> object:
+        runtime = cast(RuntimeContext, request.app.state.runtime)
+        runtime.intelligence_repository.ensure_default_config(utc_now())
+        return runtime.phase7_repository.calibration_workbench()
+
+    @app.post("/api/calibration/rescore", tags=["phase7"])
+    def rescore_history(payload: RescoreRequest, request: Request) -> object:
+        runtime = cast(RuntimeContext, request.app.state.runtime)
+        try:
+            if not payload.confirmed:
+                raise ValueError("historical rescoring requires user confirmation")
+            unique_ids = tuple(dict.fromkeys(payload.aggregate_version_ids))
+            eligible_ids = {
+                str(value["aggregate_version_id"])
+                for value in runtime.phase7_repository.calibration_workbench()["rescore_targets"]
+            }
+            if not set(unique_ids) <= eligible_ids:
+                raise ValueError("historical rescoring is limited to feedback-linked items")
+            # Validate the full scope before the first append so an invalid later item
+            # cannot leave a partially rescored user operation.
+            before = []
+            for aggregate_version_id in unique_ids:
+                runtime.intelligence_repository.get_candidate_context(aggregate_version_id)
+                scores = runtime.intelligence_repository.score_history(aggregate_version_id)
+                before.append(
+                    {
+                        "aggregate_version_id": aggregate_version_id,
+                        "score_count": len(scores),
+                        "latest_score": float(scores[-1]["total"]),
+                    }
+                )
+            score_ids = CalibrationService(runtime.intelligence_repository).rescore_history(
+                unique_ids, user_initiated=True, rescored_at=utc_now()
+            )
+            after = [runtime.intelligence_repository.get_score(score_id) for score_id in score_ids]
+            return {
+                "appended": [
+                    {
+                        **previous,
+                        "new_score_id": score.score_id,
+                        "new_score": score.result.total,
+                        "config_version": score.config_version,
+                        "score_count": cast(int, previous["score_count"]) + 1,
+                    }
+                    for previous, score in zip(before, after, strict=True)
+                ]
+            }
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -439,11 +633,72 @@ def create_app(
                 created_at=utc_now(),
             )
 
-    @app.post("/api/extension-results/{result_id}/favorite", tags=["phase7"])
-    def favorite_extension(result_id: str, request: Request) -> object:
+    @app.post("/api/archive/{event_id}/topic-idea", tags=["phase7"])
+    def generate_topic_idea(event_id: str, request: Request) -> object:
+        runtime = cast(RuntimeContext, request.app.state.runtime)
+        try:
+            runtime.repository.get_ready(event_id)
+        except ArchiveInvariantError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        aggregate_version_id = runtime.phase7_repository.current_aggregate_version_id(event_id)
+        if aggregate_version_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="archive item has no traceable aggregate version",
+            )
+
+        def response_for(*, created: bool) -> dict[str, object]:
+            idea = runtime.phase7_repository.detail(event_id)["topic_idea"]
+            if idea is None:
+                raise RuntimeError("topic idea was not persisted")
+            return {
+                "status": "SUCCEEDED",
+                "created": created,
+                "idea": idea,
+            }
+
+        existing = runtime.intelligence_repository.get_topic_idea(aggregate_version_id)
+        if existing is not None:
+            return response_for(created=False)
+        if processing_llm is None:
+            raise HTTPException(
+                status_code=503,
+                detail="topic idea generation is not configured",
+            )
+        try:
+            TopicIdeaService(runtime.intelligence_repository, processing_llm).generate(
+                aggregate_version_id,
+                trigger=TopicIdeaTrigger.MANUAL,
+                created_at=utc_now(),
+            )
+            return response_for(created=True)
+        except IntegrityError:
+            concurrent = runtime.intelligence_repository.get_topic_idea(aggregate_version_id)
+            if concurrent is not None:
+                return response_for(created=False)
+            raise
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=502, detail="topic idea generation timed out; retry is available"
+            ) from exc
+        except ProcessingContractError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="topic idea generation returned invalid output; retry is available",
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=502, detail="topic idea generation failed; retry is available"
+            ) from exc
+
+    def _favorite_extension(result_id: str, request: Request) -> object:
         runtime = cast(RuntimeContext, request.app.state.runtime)
         try:
             result = runtime.phase7_repository.get_extension_result(result_id)
+            completed = runtime.phase7_repository.extension_favorite_outcome(result_id)
+            if completed is not None:
+                runtime.repository.update_user_metadata(str(completed["event_id"]), favorite=True)
+                return completed
             existing = runtime.phase7_repository.find_event_by_source_url(str(result["url"]))
             if existing is not None:
                 runtime.repository.update_user_metadata(existing, favorite=True)
@@ -472,5 +727,10 @@ def create_app(
             }
         except (Phase7RepositoryError, ExtensionIngestionError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/extension-results/{result_id}/favorite", tags=["phase7"])
+    def favorite_extension(result_id: str, request: Request) -> object:
+        with extension_favorite_lock:
+            return _favorite_extension(result_id, request)
 
     return app

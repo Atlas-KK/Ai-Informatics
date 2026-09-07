@@ -867,6 +867,19 @@ ui_settings = Table(
     ),
 )
 
+github_discovery_settings = Table(
+    "github_discovery_settings",
+    metadata,
+    Column("singleton_id", Integer, primary_key=True),
+    Column("daily_trending", Boolean, nullable=False),
+    Column("weekly_trending", Boolean, nullable=False),
+    Column("seven_day_star_growth", Boolean, nullable=False),
+    Column("ai_relevance", Boolean, nullable=False),
+    Column("whitelist_json", Text, nullable=False),
+    Column("updated_at", String(40), nullable=False),
+    CheckConstraint("singleton_id = 1", name="ck_github_discovery_settings_singleton"),
+)
+
 archive_search_documents = Table(
     "archive_search_documents",
     metadata,

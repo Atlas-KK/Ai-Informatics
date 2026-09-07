@@ -74,12 +74,21 @@ class TrashRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class GitHubRulesRequest(BaseModel):
+    daily_trending: bool
+    weekly_trending: bool
+    seven_day_star_growth: bool
+    ai_relevance: bool
+    whitelist: list[str] = Field(default_factory=list, max_length=200)
+
+
 class SettingsRequest(BaseModel):
     schedule_time: str
     selection_threshold: float = Field(ge=0, le=100)
     tier_caps: dict[str, int]
     topic_order: tuple[str, ...]
     default_sort: Literal["PUBLISHED_DESC", "SCORE_DESC"]
+    github_rules: GitHubRulesRequest
 
 
 class ExpansionSearchRequest(BaseModel):
@@ -95,4 +104,9 @@ class FeedbackRequest(BaseModel):
 
 
 class ConfirmationRequest(BaseModel):
+    confirmed: bool
+
+
+class RescoreRequest(BaseModel):
+    aggregate_version_ids: tuple[str, ...] = Field(min_length=1, max_length=200)
     confirmed: bool
